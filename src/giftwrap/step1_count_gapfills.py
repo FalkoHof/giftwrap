@@ -270,13 +270,9 @@ def search_files(read1s, read2s, output_dir, tech_info,
 
     with read_fastqs(read1s, read2s) as (read1_iterator, read2_iterator):
 
-        # Observed raw sequencing lengths, recorded in the main process as batches are read
-        read_lengths = {"R1_CYCLES": 0, "R2_CYCLES": 0}
-        read_pairs = track_read_lengths(zip(read1_iterator, read2_iterator), read_lengths)
-
         # Note we have to map to tuple because starmap expects tuple inputs
         n_jobs = max(cores, 1)
-        batched_reads = batched(map(lambda x: (x,), batched(read_pairs, n_reads_per_batch // n_jobs)), n_jobs)
+        batched_reads = batched(map(lambda x: (x,), batched(zip(read1_iterator, read2_iterator), n_reads_per_batch // n_jobs)), n_jobs)
 
         mp = maybe_multiprocess(cores)
 
