@@ -105,10 +105,74 @@ def read_manifest(output_dir: Path) -> pd.DataFrame:
     - original_gap_probe_sequence: The expected WT gap probe sequence
     :param output_dir: The pipeline output directory.
     :return: The parsed dataframe which should be indexed by the index.
+
+    The file may start with run-configuration header lines of the form ``# key=<json>`` (written by
+    :func:`write_manifest`); they are skipped here and parsed by :func:`read_manifest_config`.
     """
     if not isinstance(output_dir, Path):
         output_dir = Path(output_dir)
-    return pd.read_table(output_dir / "manifest.tsv")
+    with open(output_dir / "manifest.tsv", "r", encoding="utf-8") as f:
+        _skip_manifest_header(f)
+        return pd.read_table(f)
+
+
+_MANIFEST_HEADER_PREFIX = "# "
+
+
+def _skip_manifest_header(f) -> list[str]:
+    """
+    Consume leading ``# key=<json>`` header lines from an open manifest file handle, leaving the
+    handle positioned at the TSV header row. Returns the raw header lines (without the prefix).
+    """
+    header_lines = []
+    while True:
+        pos = f.tell()
+        line = f.readline()
+        if line.startswith(_MANIFEST_HEADER_PREFIX):
+            header_lines.append(line[len(_MANIFEST_HEADER_PREFIX):].rstrip("\r\n"))
+        else:
+            f.seek(pos)
+            return header_lines
+
+
+def read_manifest_config(output_dir: Path) -> dict:
+    """
+    Read the run-configuration header embedded at the top of ``manifest.tsv`` by step 1
+    (technology, multiplexing, truncated-read options, minimum cycle requirements, ...).
+
+    :param output_dir: The pipeline output directory.
+    :return: The configuration as a dict. Empty when the manifest has no header (older runs).
+    """
+    if not isinstance(output_dir, Path):
+        output_dir = Path(output_dir)
+    with open(output_dir / "manifest.tsv", "r", encoding="utf-8") as f:
+        header_lines = _skip_manifest_header(f)
+    config = {}
+    for line in header_lines:
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        try:
+            config[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            config[key.strip()] = value
+    return config
+
+
+def write_manifest(output_dir: Path, df: pd.DataFrame, config: Optional[dict] = None) -> None:
+    """
+    Write ``manifest.tsv``, optionally prefixed with ``# key=<json>`` run-configuration header lines.
+
+    :param output_dir: The pipeline output directory.
+    :param df: The manifest dataframe.
+    :param config: Optional run configuration to embed. Values must be JSON-serializable.
+    """
+    if not isinstance(output_dir, Path):
+        output_dir = Path(output_dir)
+    with open(output_dir / "manifest.tsv", "w", encoding="utf-8", newline="") as f:
+        for key, value in (config or {}).items():
+            f.write(f"{_MANIFEST_HEADER_PREFIX}{key}={json.dumps(value)}\n")
+        df.to_csv(f, index=False, sep="\t", lineterminator="\n")
 
 
 class TechnologyFormatInfo(ABC):
@@ -278,6 +342,28 @@ class TechnologyFormatInfo(ABC):
         """
         return False
 
+    @property
+    def probe_barcode_ids(self) -> list[str]:
+        """
+        The canonical probe (sample) barcode identifiers in their defined order, e.g. ``"1"``..``"16"``
+        for Flex v1 or ``"A-A01"``.. for Flex v2. ``--multiplex N`` selects the first N of these.
+        Empty when the technology has no probe barcode.
+        """
+        mapping = getattr(self, "_index_to_probe_barcodes", None)
+        return list(mapping) if mapping else []
+
+    def normalize_probe_barcode_id(self, bc: str) -> str:
+        """
+        Convert a user-supplied probe barcode identifier (``--barcode``) to its canonical form as used
+        in :attr:`probe_barcode_ids`. The base implementation accepts only exact identifiers.
+        :raises ValueError: If the identifier is not recognised.
+        """
+        bc = str(bc).strip()
+        ids = self.probe_barcode_ids
+        if ids and bc not in ids:
+            raise ValueError(f"Unknown probe barcode '{bc}' for {type(self).__name__}. Valid ids: {', '.join(ids)}")
+        return bc
+
     @abstractmethod
     def probe_barcode_index(self, bc: str) -> int:
         """
@@ -336,6 +422,50 @@ _tx_barcode_oligos = {s: str(i+1) for i, s in enumerate([
     "ATTCGGTT"
 ])}
 _tx_barcode_to_oligo = {v: k for k, v in _tx_barcode_oligos.items()}
+
+
+def _normalize_flex_v1_barcode_id(bc: str, n_barcodes: int = 16) -> str:
+    """
+    Normalize a Flex v1 probe barcode id. Accepts ``N``, ``BCN``, ``BC0N``, ``BC00N`` (case-insensitive)
+    and returns the canonical ``"N"`` string used as the key in ``_tx_barcode_to_oligo``.
+    :raises ValueError: If the id is not of that form or out of range.
+    """
+    raw = str(bc).strip()
+    s = raw.upper()
+    if s.startswith("BC"):
+        s = s[2:]
+    if not s.isdigit() or not (1 <= int(s) <= n_barcodes):
+        raise ValueError(
+            f"Unknown Flex v1 probe barcode '{raw}'. Expected an integer 1-{n_barcodes}, optionally prefixed with 'BC' "
+            f"(e.g. BC01)."
+        )
+    return str(int(s))
+
+
+def _normalize_flex_v2_barcode_id(bc: str, valid_ids: Iterable[str]) -> str:
+    """
+    Normalize a Flex v2 probe barcode id to the ``<plate>-<well>`` form used in ``flex-v2-384.txt``
+    (e.g. ``A-A01``). Accepts ``P-WNN``, ``P-WN``, ``WNN`` and ``WN`` (case-insensitive); when the plate is
+    omitted, plate ``A`` is assumed, matching the documented ``A01`` default.
+    :raises ValueError: If the id cannot be mapped onto a known well.
+    """
+    valid = list(valid_ids)
+    raw = str(bc).strip()
+    s = raw.upper()
+    if s in valid:
+        return s
+    plate, sep, well = s.partition("-")
+    if not sep:
+        plate, well = "A", s
+    row, col = well[:1], well[1:]
+    if row.isalpha() and col.isdigit():
+        candidate = f"{plate}-{row}{int(col):02d}"
+        if candidate in valid:
+            return candidate
+    raise ValueError(
+        f"Unknown Flex v2 probe barcode '{raw}'. Expected a well id such as A01 (plate A assumed) or A-A01 "
+        f"(<plate>-<well>); valid plates: {', '.join(sorted({v.split('-')[0] for v in valid}))}."
+    )
 
 
 def _parse_possible_barcodes(barcode_lists: list[Path]) -> np.ndarray[str]:
@@ -480,6 +610,9 @@ class FlexFormatInfo(TechnologyFormatInfo):
 
     def probe_barcode_index(self, bc: str):
         return self._probe_barcodes[bc]
+
+    def normalize_probe_barcode_id(self, bc: str) -> str:
+        return _normalize_flex_v1_barcode_id(bc, len(self._index_to_probe_barcodes))
 
     def make_barcode_string(self, cell_barcode: str, plex: str = "1", x_coord: Optional[int] = None, y_coord: Optional[int] = None, is_multiplexed: bool = False) -> str:
         if is_multiplexed:
@@ -631,6 +764,9 @@ class FlexV2FormatInfo(TechnologyFormatInfo):
 
     def probe_barcode_index(self, bc: str):
         return self._probe_barcodes[bc]
+
+    def normalize_probe_barcode_id(self, bc: str) -> str:
+        return _normalize_flex_v2_barcode_id(bc, self._index_to_probe_barcodes)
 
     def make_barcode_string(self, cell_barcode: str, plex: str = "1", x_coord: Optional[int] = None, y_coord: Optional[int] = None, is_multiplexed: bool = False) -> str:
         if is_multiplexed:

@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from .pipeline_utils import normalize_barcodes_to_target, real_gapfill_mask
+from .pipeline_utils import normalize_barcodes_to_target, real_gapfill_mask, read_manifest_config
 
 # Third-party web assets are vendored under giftwrap/assets/ and inlined into the
 # report so it renders with no network access — these reports are routinely opened
@@ -558,6 +558,14 @@ def _build_hero_metrics(fastq: dict, counts: dict, gapfill_adata=None) -> list[d
     else:
         probes_per_cell = 0.0
 
+    def _cycles(key: str) -> str:
+        # Older fastq_metrics.tsv files (pre-R1/R2_CYCLES) have no entry: show n/a rather than 0.
+        try:
+            v = int(fastq[key])
+        except (KeyError, TypeError, ValueError):
+            return "n/a"
+        return f"{v:,}" if v > 0 else "n/a"
+
     return [
         {"label": "Cells with Probes",          "value": f"{cells_w_probes:,}",                           "sub": "gapfill-containing barcodes",
          "tip": "Number of called cells with at least one detected gapfill probe (UMI > 0)."},
@@ -571,6 +579,10 @@ def _build_hero_metrics(fastq: dict, counts: dict, gapfill_adata=None) -> list[d
          "tip": "Fraction of all called cells that contain at least one gapfill probe. Requires a separate cell-calling denominator (e.g. WTA/cellranger barcodes)."},
         {"label": "Total Reads",               "value": f"{int(total):,}",                              "sub": "sequenced read pairs",
          "tip": "Total input read pairs before any filtering."},
+        {"label": "R1 Cycles",                 "value": _cycles("R1_CYCLES"),                            "sub": "Read 1 bases used",
+         "tip": "Read 1 length used: longest R1 in the FASTQs, capped by --r1_length if set."},
+        {"label": "R2 Cycles",                 "value": _cycles("R2_CYCLES"),                            "sub": "Read 2 bases used",
+         "tip": "Read 2 length used: longest R2 in the FASTQs, capped by --r2_length if set."},
         {"label": "Reads Mapped",              "value": f"{pct_mapped:.1f}%",                           "sub": "probe-containing reads",
          "tip": "Percentage of input reads where a gapfill probe was successfully identified and assigned to a cell barcode."},
         {"label": "Sequencing Saturation",     "value": f"{sat:.1f}%",                                  "sub": "PCR duplicate fraction",
@@ -594,14 +606,87 @@ _BREADTH_SINGLETON_ERROR_PCT   = 0.75
 _CORR_RHO_WARN                 = 0.05   # warn below this Spearman rho
 _CORR_ZERO_FRAC_WARN           = 0.50   # warn when this fraction of WTA>0 points have gapfill==0
 _CORR_ZERO_FRAC_ERROR          = 0.75
+_SHORT_R2_CYCLES               = 51     # Flex R2 at or below this needs truncated-read options (--skip_constant_seq etc.)
+_FLEX_TECHNOLOGIES             = ("Flex", "Flex-v2", "Flex-v2-R1")
+_TECHNOLOGY_LABELS = {
+    "Flex": "10x Flex v1",
+    "Flex-v2": "10x Flex v2",
+    "Flex-v2-R1": "10x Flex v2 (R1 demux)",
+    "VisiumHD": "Visium HD",
+    "Custom": "Custom",
+}
 
 
-def _evaluate_flags(fastq: dict, counts: dict, gapfill_adata, wta_stats: Optional[dict]) -> list[dict]:
+def _technology_label(technology: Optional[str]) -> Optional[str]:
+    """Human-readable chemistry label for a ``--technology`` value, or None if unknown."""
+    if not technology:
+        return None
+    if technology in _TECHNOLOGY_LABELS:
+        return _TECHNOLOGY_LABELS[technology]
+    if technology.startswith("Visium-v"):
+        return f"Visium {technology[len('Visium-'):]}"
+    return technology
+
+
+def _as_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cycle_flags(fastq: dict, run_config: Optional[dict], _add) -> None:
+    """R1/R2 cycle checks that depend on the technology and run options step 1
+    embedded in the manifest.tsv header. Emits at most one flag per hero card
+    (error wins over warning), since the card lookup keeps only one flag per label.
+    """
+    if not run_config:
+        return
+    r1 = _as_int(fastq.get("R1_CYCLES"), 0)
+    r2 = _as_int(fastq.get("R2_CYCLES"), 0)
+    tech = run_config.get("technology")
+    tech_label = _technology_label(tech) or str(tech)
+    multiplexed = bool(run_config.get("multiplexed"))
+    n_plex = len(run_config.get("barcodes") or []) or _as_int(run_config.get("multiplex"), 1)
+    min_r2 = _as_int(run_config.get("min_r2_for_probe_barcode"), 0)
+    min_r1 = _as_int(run_config.get("min_r1_for_probe_barcode"), 0)
+
+    plex_txt = f"{n_plex} barcode{'s' if n_plex != 1 else ''}"
+
+    r2_flagged = False
+    if r2 and tech in ("Flex", "Flex-v2") and multiplexed and min_r2 and r2 < min_r2:
+        alt = " Flex v2 libraries can use --technology Flex-v2-R1 instead." if tech == "Flex-v2" else ""
+        _add("error", "R2 Cycles", "R2 too short to read the sample barcode",
+             f"Multiplexed ({plex_txt}) but R2 is {r2} cycles; the sample barcode ends at base {min_r2} for the "
+             f"longest probe. Reads that cannot reach the constant sequence are dropped as FILTERED_NO_CONSTANT; "
+             f"reads that reach it but not the barcode as FILTERED_NO_PROBE_BARCODE. Resequence with at least "
+             f"{min_r2} R2 cycles.{alt}")
+        r2_flagged = True
+
+    if r1 and tech == "Flex-v2-R1" and multiplexed and min_r1 and r1 < min_r1:
+        _add("error", "R1 Cycles", "R1 too short to demultiplex sample barcode",
+             f"Multiplexed ({plex_txt}) with the sample barcode on R1, but R1 is {r1} cycles and the barcode ends "
+             f"at base {min_r1}. Reads are dropped as FILTERED_NO_PROBE_BARCODE. Resequence with at least {min_r1} "
+             f"R1 cycles.")
+
+    handles_truncation = (bool(run_config.get("skip_constant_seq"))
+                          or _as_int(run_config.get("trim_probes"), -1) > 0
+                          or _as_int(run_config.get("expected_gap_length"), -1) >= 0)
+    if r2 and tech in _FLEX_TECHNOLOGIES and r2 <= _SHORT_R2_CYCLES and not handles_truncation and not r2_flagged:
+        _add("warning", "R2 Cycles", "Short R2 without truncated-read handling",
+             f"R2 is {r2} cycles, usually too short to reach the constant sequence on {tech_label}, so reads are "
+             f"dropped as FILTERED_NO_CONSTANT or FILTERED_NO_RHS. Rerun with --skip_constant_seq and/or "
+             f"--trim_probes (or --expected_gap_length).")
+
+
+def _evaluate_flags(fastq: dict, counts: dict, gapfill_adata, wta_stats: Optional[dict],
+                    run_config: Optional[dict] = None) -> list[dict]:
     """QC checks that surface as a card at the top of every tab, and — for the
-    four metrics that have a dedicated hero stat box (``hero_label`` set,
+    metrics that have a dedicated hero stat box (``hero_label`` set,
     matching a `_build_hero_metrics` label) — also color that box with a
     hover tooltip. ``tab``/``plot_id`` (when set) let the card link straight
-    to the plot the flag is about.
+    to the plot the flag is about. ``run_config`` is the step 1 run
+    configuration from the manifest.tsv header (see `_cycle_flags`).
     """
     flags: list[dict] = []
 
@@ -710,6 +795,9 @@ def _evaluate_flags(fastq: dict, counts: dict, gapfill_adata, wta_stats: Optiona
                      f"gapfill signal. Consider evaluating the probe sequences and panel design.",
                      tab="wta", plot_id=plot_id)
 
+    # R1 / R2 cycles vs. technology and run options
+    _cycle_flags(fastq, run_config, _add)
+
     return flags
 
 
@@ -745,7 +833,7 @@ def _flag_cards_html(flags: list[dict]) -> str:
 
 # ── Metrics tab: logical row order + good/bad group coloring ──
 _FASTQ_ORDER = [
-    "TOTAL_READS", "POSSIBLE_PROBES", "PROBES_ENCOUNTERED", "PROBE_CONTAINING_READS",
+    "TOTAL_READS", "R1_CYCLES", "R2_CYCLES", "POSSIBLE_PROBES", "PROBES_ENCOUNTERED", "PROBE_CONTAINING_READS",
     "EXACT", "CORRECTED_LHS", "CORRECTED_RHS", "CORRECTED_BARCODE",
     "FILTERED_NO_LHS", "FILTERED_NO_RHS", "FILTERED_NO_CONSTANT",
     "FILTERED_NO_CELL_BARCODE", "FILTERED_NO_PROBE_BARCODE",
@@ -803,6 +891,8 @@ _FASTQ_HELP = {
     "POSSIBLE_PROBES":               "Total number of distinct probe sequences in the reference panel file.",
     "PROBES_ENCOUNTERED":            "Number of distinct probes actually detected in this dataset (out of all possible probes).",
     "TOTAL_READS":                   "Total input read pairs before any filtering.",
+    "R1_CYCLES":                     "Read 1 length used: longest R1 in the FASTQs, capped by --r1_length if set.",
+    "R2_CYCLES":                     "Read 2 length used: longest R2 in the FASTQs, capped by --r2_length if set.",
     "FILTERED_NO_CONSTANT":          "Reads discarded because the constant flanking sequence (spacer between barcode and probe) could not be found. Often indicates an adapter trimming or chemistry mismatch.",
     "CORRECTED_BARCODE":             "Reads where the cell barcode had exactly 1 mismatch corrected against the 10x Flex whitelist.",
     "CORRECTED_LHS":                 "Reads where the left-hand side anchor sequence had sequencing errors that were corrected.",
@@ -1521,6 +1611,11 @@ def make_html_report(
         counts = pd.read_table(counts_metrics_path).set_index("statistic")["value"].to_dict()
     except Exception as e:
         print(f"  Warning: could not read summary.tsv: {e}")
+    run_config: dict = {}
+    try:
+        run_config = read_manifest_config(Path(fastq_metrics_path).parent)
+    except Exception as e:
+        print(f"  Warning: could not read run configuration from manifest.tsv: {e}")
 
     sankey_fig          = _fig_sankey(fastq, counts)
     barcode_rank_fig    = _fig_barcode_rank(gapfill_adata)
@@ -1567,7 +1662,7 @@ def make_html_report(
     wta_plot_js = "plot('plot-wta-sc', FIGS.wta_sc);\nplot('plot-wta-pb', FIGS.wta_pb);" if wta_figs else ""
 
     hero = _build_hero_metrics(fastq, counts, gapfill_adata)
-    flags = _evaluate_flags(fastq, counts, gapfill_adata, wta_stats)
+    flags = _evaluate_flags(fastq, counts, gapfill_adata, wta_stats, run_config)
     flags_html = _flag_cards_html(flags)
     box_flags = {f["hero_label"]: f for f in flags if f.get("hero_label")}
 
@@ -1638,7 +1733,7 @@ def make_html_report(
         ).to_csv(index=False)
         # Still emit the sidecar file for pipeline consumers (P5.3) ...
         pd.DataFrame(metric_rows[1:], columns=metric_rows[0]).to_csv(metrics_csv_path, index=False)
-        print(f"  Metrics CSV written → {metrics_csv_path}")
+        print(f"  Metrics CSV written -> {metrics_csv_path}")
         # ... but embed the same CSV as a base64 data URI so the download works
         # even if the HTML is moved away from the sidecar file (self-contained).
         b64 = base64.b64encode(csv_text.encode("utf-8")).decode("ascii")
@@ -1669,20 +1764,23 @@ def make_html_report(
             '&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">'
         )
 
-    # Determine chemistry label based on whether spatial data was provided
-    chemistry = "10x Flex"
-    try:
-        is_spatial = False
-        if adata is not None:
-            # Look for common spatial indicators in AnnData obsm/uns
-            if hasattr(adata, 'obsm') and any('spatial' in str(k).lower() for k in getattr(adata, 'obsm').keys()):
-                is_spatial = True
-            if not is_spatial and hasattr(adata, 'uns') and any('spatial' in str(k).lower() for k in getattr(adata, 'uns').keys()):
-                is_spatial = True
-        if is_spatial:
-            chemistry = "Visium HD"
-    except Exception:
+    # Chemistry label: from the run configuration step 1 embedded in manifest.tsv when available,
+    # otherwise guess from whether spatial data was provided.
+    chemistry = _technology_label(run_config.get("technology")) if run_config else None
+    if chemistry is None:
         chemistry = "10x Flex"
+        try:
+            is_spatial = False
+            if adata is not None:
+                # Look for common spatial indicators in AnnData obsm/uns
+                if hasattr(adata, 'obsm') and any('spatial' in str(k).lower() for k in getattr(adata, 'obsm').keys()):
+                    is_spatial = True
+                if not is_spatial and hasattr(adata, 'uns') and any('spatial' in str(k).lower() for k in getattr(adata, 'uns').keys()):
+                    is_spatial = True
+            if is_spatial:
+                chemistry = "Visium HD"
+        except Exception:
+            chemistry = "10x Flex"
 
     chemistry_span = f"<span><b>Chemistry</b> {chemistry}</span>"
 
@@ -1706,4 +1804,4 @@ def make_html_report(
         timestamp=timestamp,
     )
     output_file.write_text(html, encoding="utf-8")
-    print(f"  HTML report written → {output_file}")
+    print(f"  HTML report written -> {output_file}")

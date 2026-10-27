@@ -82,11 +82,12 @@ def revert_probes():
         raise FileNotFoundError(f"Input file {input} does not exist.")
 
     from .step1_count_gapfills import build_manifest
+    from .pipeline_utils import read_manifest
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         with warnings.catch_warnings(), open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
             build_manifest(input, tmpdir, overwrite=True, allow_any_combination=False)
-        probes = pd.read_csv(tmpdir / "manifest.tsv", sep="\t")
+        probes = read_manifest(tmpdir)
 
     # Next, we need to convert the GIFTwrap probe file back to the 10X Genomics format
     print("#probe_set_file_format=3.0")

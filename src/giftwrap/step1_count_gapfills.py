@@ -17,10 +17,47 @@ import pandas as pd
 from tqdm import tqdm
 from rich_argparse import RichHelpFormatter
 
-from .pipeline_utils import batched, read_manifest, sort_tsv_file, FlexFormatInfo, VisiumHDFormatInfo, \
+from .pipeline_utils import batched, read_manifest, write_manifest, sort_tsv_file, FlexFormatInfo, VisiumHDFormatInfo, \
     VisiumFormatInfo, TechnologyFormatInfo, compute_max_distance, read_probes_input, read_fastqs, \
     ReadProcessState, ProbeParser, FlexV2FormatInfo
 from .analysis_utils import maybe_multiprocess
+
+def track_read_lengths(pairs, lengths: dict):
+    """
+    Pass-through generator over (r1, r2) FASTQ record pairs that records the longest raw
+    R1 and R2 sequence seen into ``lengths["R1_CYCLES"]`` / ``lengths["R2_CYCLES"]``.
+    The maximum is used because adapter-trimmed reads may be shorter than the number of
+    sequencing cycles. Explicit ``--r1_length``/``--r2_length`` caps are applied afterwards
+    by :func:`effective_read_lengths`.
+    """
+    r1_max = lengths.get("R1_CYCLES", 0)
+    r2_max = lengths.get("R2_CYCLES", 0)
+    for r1, r2 in pairs:
+        l1 = len(r1[1])
+        l2 = len(r2[1])
+        if l1 > r1_max:
+            r1_max = l1
+            lengths["R1_CYCLES"] = r1_max
+        if l2 > r2_max:
+            r2_max = l2
+            lengths["R2_CYCLES"] = r2_max
+        yield r1, r2
+
+
+def effective_read_lengths(lengths: dict, tech_info: TechnologyFormatInfo) -> tuple[int, int]:
+    """
+    Returns the (R1, R2) lengths actually used by the pipeline: the observed raw read length,
+    capped by ``tech_info.read1_length`` / ``tech_info.read2_length`` when those were set
+    explicitly (``--r1_length`` / ``--r2_length``), mirroring the truncation in :func:`process_reads`.
+    """
+    r1 = lengths.get("R1_CYCLES", 0)
+    r2 = lengths.get("R2_CYCLES", 0)
+    if tech_info.read1_length is not None:
+        r1 = min(r1, tech_info.read1_length) if r1 else tech_info.read1_length
+    if tech_info.read2_length is not None:
+        r2 = min(r2, tech_info.read2_length) if r2 else tech_info.read2_length
+    return r1, r2
+
 
 ReadData = namedtuple("ReadData", ["probe_id", "probe_barcode", "gapfill", "gapfill_quality", "cell_barcode", "umi", "umi_quality", "coordinate_x", "coordinate_y"])
 
@@ -214,11 +251,13 @@ def search_files(read1s, read2s, output_dir, tech_info,
     names = probes['name'].tolist()
     probe_bc_provided = True
     if multiplex > 1:
-        probe_bcs = list(range(1, multiplex+1))
-        # Switch to using all probe_bcs
-        # probe_bcs = list(range(1, len(tech_info.probe_barcodes) + 1))
+        # The first N probe barcodes in the technology's defined order ("1".."N" for Flex v1, A-A01.. for Flex v2)
+        probe_bcs = tech_info.probe_barcode_ids[:multiplex]
+        if len(probe_bcs) < multiplex:
+            raise ValueError(f"--multiplex {multiplex} requested but {type(tech_info).__name__} defines only "
+                             f"{len(probe_bcs)} probe barcodes.")
     elif barcodes is not None and len(barcodes) > 0:
-        probe_bcs = barcodes
+        probe_bcs = [tech_info.normalize_probe_barcode_id(b) for b in barcodes]
     else:
         probe_bcs = None
         probe_bc_provided = False
@@ -231,9 +270,13 @@ def search_files(read1s, read2s, output_dir, tech_info,
 
     read1_iterator, read2_iterator = read_fastqs(read1s, read2s)
 
+    # Observed raw sequencing lengths, recorded in the main process as batches are read
+    read_lengths = {"R1_CYCLES": 0, "R2_CYCLES": 0}
+    read_pairs = track_read_lengths(zip(read1_iterator, read2_iterator), read_lengths)
+
     # Note we have to map to tuple because starmap expects tuple inputs
     n_jobs = max(cores, 1)
-    batched_reads = batched(map(lambda x: (x,), batched(zip(read1_iterator, read2_iterator), n_reads_per_batch // n_jobs)), n_jobs)
+    batched_reads = batched(map(lambda x: (x,), batched(read_pairs, n_reads_per_batch // n_jobs)), n_jobs)
 
     mp = maybe_multiprocess(cores)
 
@@ -334,6 +377,9 @@ def search_files(read1s, read2s, output_dir, tech_info,
         f.write(f"PROBE_CONTAINING_READS\t{total}\n")
         f.write(f"POSSIBLE_PROBES\t{probes.shape[0]}\n")
         f.write(f"PROBES_ENCOUNTERED\t{len(probe_ids_encountered)}\n")
+        r1_cycles, r2_cycles = effective_read_lengths(read_lengths, tech_info)
+        f.write(f"R1_CYCLES\t{r1_cycles}\n")
+        f.write(f"R2_CYCLES\t{r2_cycles}\n")
         for state, count in result_reason_counter.items():
             f.write(f"{state.name}\t{count}\n")
 
@@ -345,7 +391,61 @@ def search_files(read1s, read2s, output_dir, tech_info,
     print(f"{total} reads extracted.")
 
 
-def build_manifest(probes, output: Path, overwrite, allow_any_combination, trim_probes) -> int:
+def _expected_gap_length(row) -> int:
+    """
+    The longest expected gapfill for a manifest row: max over gap_probe_sequence / original_gap_probe_sequence,
+    or 0 when neither is defined.
+    """
+    original_gap_probe_sequence = row['original_gap_probe_sequence']
+    gap_probe_sequence = row['gap_probe_sequence']
+    orig_gap_is_na = (original_gap_probe_sequence == "NA" or pd.isna(original_gap_probe_sequence))
+    gap_is_na = (gap_probe_sequence == "NA" or pd.isna(gap_probe_sequence))
+    if orig_gap_is_na and gap_is_na:
+        return 0
+    elif not orig_gap_is_na and gap_is_na:
+        return len(original_gap_probe_sequence)
+    elif orig_gap_is_na and not gap_is_na:
+        return len(gap_probe_sequence)
+    return max(len(original_gap_probe_sequence), len(gap_probe_sequence))
+
+
+def compute_barcode_read_requirements(tech_info: TechnologyFormatInfo, max_probe_extent: int) -> dict:
+    """
+    The minimum read lengths needed to fully sequence the probe (sample) barcode for a technology, given
+    the longest untrimmed probe insert (lhs + gapfill + rhs) in the panel.
+
+    :param tech_info: The technology definition.
+    :param max_probe_extent: Longest lhs + expected gapfill + rhs across the (untrimmed) panel.
+    :return: ``{"min_r1_for_probe_barcode": int | None, "min_r2_for_probe_barcode": int | None}``. Only one is
+        set depending on whether the barcode is read from R1 or R2; both are None when the technology has no
+        probe barcode or does not define the required layout properties.
+    """
+    result = {"min_r1_for_probe_barcode": None, "min_r2_for_probe_barcode": None}
+    try:
+        if not tech_info.has_probe_barcode:
+            return result
+        bc_end = tech_info.probe_barcode_start + tech_info.probe_barcode_length
+        if tech_info.probe_barcode_R1:
+            result["min_r1_for_probe_barcode"] = int(bc_end)
+        else:
+            constant_len = len(tech_info.constant_sequence) if tech_info.has_constant_sequence else 0
+            result["min_r2_for_probe_barcode"] = int(max_probe_extent + constant_len + bc_end)
+    except (AttributeError, NotImplementedError, TypeError):
+        pass
+    return result
+
+
+def build_manifest(probes, output: Path, overwrite, allow_any_combination, trim_probes: int = -1,
+                   config: Optional[dict] = None, tech_info: Optional[TechnologyFormatInfo] = None) -> tuple[int, int]:
+    """
+    Read the probe file, optionally add decoy pairings and trim probes, and write ``manifest.tsv``.
+
+    :param config: Optional run configuration to embed as the manifest header (see
+        :func:`giftwrap.pipeline_utils.write_manifest`). ``max_probe_extent``, ``max_expected_gap`` and the
+        minimum cycle requirements (when ``tech_info`` is given) are filled in here.
+    :return: ``(max_expected_gap, max_probe_extent)``: the longest expected gapfill (only computed when trimming,
+        0 otherwise, as before) and the longest untrimmed lhs + gapfill + rhs insert.
+    """
     print("Indexing probes...", end="")
     if output.exists():
         if overwrite:
@@ -390,24 +490,23 @@ def build_manifest(probes, output: Path, overwrite, allow_any_combination, trim_
 
         print(f"{(~df['was_defined']).sum()} decoy pairings added.")
 
+    # Longest untrimmed probe insert (lhs + expected gapfill + rhs); the probe barcode sits after this on the read
+    if 'gap_probe_sequence' in df.columns and 'original_gap_probe_sequence' in df.columns:
+        gap_lengths = [_expected_gap_length(row) for _, row in df.iterrows()]
+    else:
+        gap_lengths = [0] * df.shape[0]
+    max_probe_extent = int(max(
+        (len(lhs) + g + len(rhs) for lhs, rhs, g in zip(df['lhs_probe'], df['rhs_probe'], gap_lengths)),
+        default=0
+    ))
+
     max_expected_gap = 0
     if trim_probes > 0:
         print("Trimming probes to an expected length of", trim_probes)
         for i, row in list(df.iterrows()):
-            original_gap_probe_sequence = row['original_gap_probe_sequence']
-            gap_probe_sequence = row['gap_probe_sequence']
-            orig_gap_is_na = (original_gap_probe_sequence == "NA" or pd.isna(original_gap_probe_sequence))
-            gap_is_na = (gap_probe_sequence == "NA" or pd.isna(gap_probe_sequence))
-            if orig_gap_is_na and gap_is_na:
-                gap_length = 0
-            elif not orig_gap_is_na and gap_is_na:
-                gap_length = len(original_gap_probe_sequence)
-            elif orig_gap_is_na and not gap_is_na:
-                gap_length = len(gap_probe_sequence)
-            else:
-                gap_length = max(len(original_gap_probe_sequence), len(gap_probe_sequence))
+            gap_length = _expected_gap_length(row)
 
-            max_expected_gap = gap_length
+            max_expected_gap = max(max_expected_gap, gap_length)
 
             to_trim_from_rhs = trim_probes - gap_length - len(row['lhs_probe'])
             if to_trim_from_rhs < 0:
@@ -423,10 +522,17 @@ def build_manifest(probes, output: Path, overwrite, allow_any_combination, trim_
     df.reset_index(drop=True, inplace=True)
     df["index"] = df.index
 
-    # Write the manifest to the output directory
-    df.to_csv(output / "manifest.tsv", index=False, sep="\t")
+    # Write the manifest to the output directory, with the run configuration embedded as its header
+    if config is not None:
+        config = dict(config)
+        config["max_probe_extent"] = max_probe_extent
+        cli_gap = config.get("expected_gap_length")
+        config["max_expected_gap"] = int(cli_gap) if cli_gap is not None and int(cli_gap) >= 0 else max_expected_gap
+        if tech_info is not None:
+            config.update(compute_barcode_read_requirements(tech_info, max_probe_extent))
+    write_manifest(output, df, config)
 
-    return max_expected_gap
+    return max_expected_gap, max_probe_extent
 
 
 def run(probes,
@@ -581,7 +687,31 @@ def run(probes,
         )
     print(f"{tech_info.n_barcodes} cell barcodes found.")
 
-    computed_max_expected_gap = build_manifest(probes, output, overwrite, allow_any_combination, trim_probes)
+    # Canonical probe barcode ids (accepts e.g. BC01 / A01 as documented); fails early on unknown ids
+    barcodes = [tech_info.normalize_probe_barcode_id(b) for b in barcodes]
+
+    # Run configuration embedded in manifest.tsv so downstream steps (e.g. the step 5 QC report) can
+    # reason about the technology and options this run was processed with.
+    run_config = {
+        "giftwrap_version": sys.modules['giftwrap'].__version__,
+        "technology": technology,
+        "tech_def": str(tech_df) if tech_df is not None else None,
+        "multiplex": int(multiplex),
+        "barcodes": list(barcodes),
+        "multiplexed": bool(multiplex > 1 or len(barcodes) > 0),
+        "skip_constant_seq": bool(skip_constant_seq),
+        "trim_probes": int(trim_probes),
+        "expected_gap_length": int(max_expected_gap),
+        "flexible_start_mapping": bool(flexible_start),
+        "allow_any_combination": bool(allow_any_combination),
+        "r1_length": r1_len,
+        "r2_length": r2_len,
+        "has_probe_barcode": bool(tech_info.has_probe_barcode),
+        "probe_barcode_R1": bool(tech_info.probe_barcode_R1),
+    }
+
+    computed_max_expected_gap, _ = build_manifest(probes, output, overwrite, allow_any_combination, trim_probes,
+                                                  config=run_config, tech_info=tech_info)
 
     if max_expected_gap < 0:
         max_expected_gap = computed_max_expected_gap

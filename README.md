@@ -53,7 +53,7 @@ The pipeline can also be run with the following arguments:
 - `--tech_def`: Custom technology definition path. See below for more details.
 - `-r1` / `-r2`: Instead of specifying a fastq prefix to search with `--project`, provide the specific R1 and R2 files.
 - `--multiplex`: If the fastq files are multiplexed, this flag should be set with the number of expected samples.
-- `--barcode`: The barcode(s) to use for the Flex run. Can be provided multiple times. Mutually exclusive with `--multiplex`. Defaults to `BC01` for Flex v1 or `A01` for Flex-v2 when omitted.
+- `--barcode`: The probe (sample) barcode(s) to keep for the Flex run. Can be provided multiple times. Mutually exclusive with `--multiplex`. Flex v1 accepts `1`-`16` or `BC01`-`BC16`; Flex v2 accepts a well such as `A01` (plate A assumed) or `A-A01` (`<plate>-<well>`, plates A-D). When omitted, the probe barcode is not parsed and all reads are kept (single-plex).
 
 Additionally each step can be run individually with the following commands:
 - `giftwrap-count`
@@ -101,6 +101,8 @@ quality control:
     - `FILTERED_NO_LHS`: The number of reads that were filtered out due to no valid left-hand side probe.
     - `FILTERED_NO_RHS`: The number of reads that were filtered out due to no valid right-hand side probe.
     - `FILTERED_NO_CONSTANT`: The number of reads that were filtered out due to no valid constant sequence region. Only applicable for Flex.
+    - `R1_CYCLES`: The Read 1 length (bases) used by the pipeline: the longest R1 observed in the FASTQs, capped by `--r1_length` if set.
+    - `R2_CYCLES`: The Read 2 length (bases) used by the pipeline: the longest R2 observed in the FASTQs, capped by `--r2_length` if set.
 
 * `counts.N.summary.tsv`: Summary statistics about the final (filtered if available) output of the pipeline.
     - `TOTAL_CELLS`: The total number of cells in the output.
