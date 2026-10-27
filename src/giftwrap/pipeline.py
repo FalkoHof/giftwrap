@@ -89,7 +89,9 @@ def main():
         action="append",
         type=str,
         default=None,
-        help="The barcode(s) to use for the Flex run. Can be provided multiple times. Mutually exclusive with --multiplex. Defaults to BC01 in FlexV1 or A01 in Flex-v2 when omitted."
+        help="The probe (sample) barcode(s) to keep for the Flex run. Can be provided multiple times. Mutually exclusive with --multiplex. "
+             "Flex v1 accepts 1-16 or BC01-BC16; Flex v2 accepts a well such as A01 (plate A assumed) or <plate>-<well> such as B-A01. "
+             "When omitted, the probe barcode is not parsed and all reads are kept (single-plex)."
     )
     parser.add_argument(
         "--unmapped_reads",

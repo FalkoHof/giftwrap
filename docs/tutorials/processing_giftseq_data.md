@@ -103,7 +103,7 @@ As is common to Flex-based experiments, GIFTwrap supports multiplexed data by sp
 $ giftwrap --multiplex 16 ...
 ```
 
-2. **Specifying the probe barcode**: Instead of processing all multiplexed data at once, by specifying `--barcode` to a named barcode value (e.g. `BC01` for Flex v1, `A01` for Flex-v2), GIFTwrap will automatically ignore reads that do not match the given probe barcode. This flag can be passed multiple times to include several barcodes. When omitted, it defaults to `BC01` for Flex v1 or `A01` for Flex-v2. Note that you will notice that many reads do not map, this is expected due to the skipping of reads that do not match the given probe barcode. An example of this option is:
+2. **Specifying the probe barcode**: Instead of processing all multiplexed data at once, by specifying `--barcode` to a named barcode value (e.g. `BC01` for Flex v1, `A01` for Flex-v2), GIFTwrap will automatically ignore reads that do not match the given probe barcode. This flag can be passed multiple times to include several barcodes. Flex v1 accepts `1`-`16` or `BC01`-`BC16`; Flex v2 accepts a well such as `A01` (plate A is assumed when the plate is omitted) or `<plate>-<well>` such as `B-A01` (plates A-D). When omitted, the probe barcode is not parsed and all reads are kept as a single plex. Note that you will notice that many reads do not map, this is expected due to the skipping of reads that do not match the given probe barcode. An example of this option is:
 
 <!-- termynal -->
 ```console

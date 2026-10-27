@@ -73,6 +73,8 @@ The final collected output is a counts file which is a custom HDF5 file format i
     - `FILTERED_NO_LHS`: The number of reads that were filtered out due to no valid left-hand side probe.
     - `FILTERED_NO_RHS`: The number of reads that were filtered out due to no valid right-hand side probe.
     - `FILTERED_NO_CONSTANT`: The number of reads that were filtered out due to no valid constant sequence region. Only applicable for Flex.
+    - `R1_CYCLES`: The Read 1 length (bases) used by the pipeline: the longest R1 observed in the FASTQs, capped by `--r1_length` if set.
+    - `R2_CYCLES`: The Read 2 length (bases) used by the pipeline: the longest R2 observed in the FASTQs, capped by `--r2_length` if set.
 
 * **counts.N.summary.tsv**: Summary statistics about the final (filtered if available) output of the pipeline.
     - `TOTAL_CELLS`: The total number of cells in the output.
@@ -96,6 +98,7 @@ The final collected output is a counts file which is a custom HDF5 file format i
 These files are generated during processing of GIFT-seq data to allow for automatic resumes and to retain intermediate filtering steps. They are not typically used for downstream analysis, but may be useful for debugging or understanding the processing steps.
 
 - **manifest.tsv**: A manifest file containing the list of probes and their associated metadata. This file is used to track the probes that were processed in the run. This also defines the index of each probe represented in the raw flat reads files generated while processing.
+    The TSV is preceded by header lines of the form `# key=<json>` recording the run configuration from `giftwrap-count`, which the step 5 QC report uses for technology-aware checks. Keys include `technology`, `multiplex`, `barcodes` (canonical ids), `multiplexed`, `skip_constant_seq`, `trim_probes`, `expected_gap_length`, `max_expected_gap`, `r1_length`/`r2_length` (explicit caps, or null), `max_probe_extent` (longest lhs + gapfill + rhs), and `min_r1_for_probe_barcode`/`min_r2_for_probe_barcode` (cycles needed to fully read the sample barcode). Read the file with `giftwrap.pipeline_utils.read_manifest` (table) and `read_manifest_config` (header), or skip lines starting with `#` in your own code.
 
 - **barcodes.tsv.gz**: A gzipped file containing the list of cell barcodes that were encountered in the run. The barcodes are used to collapse the strings into integer indices for efficient storage and processing.
 
