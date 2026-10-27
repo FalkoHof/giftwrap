@@ -41,6 +41,7 @@ output/
 ├── counts.1.summary.pdf
 ├── fastq_metrics.tsv
 ├── manifest.tsv
+├── pipeline_invocation.json  (only when run via `giftwrap`)
 ├── barcodes.tsv.gz
 ├── probe_reads.tsv.gz
 ├── probe_reads.tsv.bak.gapfill
@@ -99,6 +100,8 @@ These files are generated during processing of GIFT-seq data to allow for automa
 
 - **manifest.tsv**: A manifest file containing the list of probes and their associated metadata. This file is used to track the probes that were processed in the run. This also defines the index of each probe represented in the raw flat reads files generated while processing.
     The TSV is preceded by header lines of the form `# key=<json>` recording the run configuration from `giftwrap-count`, which the step 5 QC report uses for technology-aware checks. Keys include `technology`, `multiplex`, `barcodes` (canonical ids), `multiplexed`, `skip_constant_seq`, `trim_probes`, `expected_gap_length`, `max_expected_gap`, `r1_length`/`r2_length` (explicit caps, or null), `max_probe_extent` (longest lhs + gapfill + rhs), and `min_r1_for_probe_barcode`/`min_r2_for_probe_barcode` (cycles needed to fully read the sample barcode). Read the file with `giftwrap.pipeline_utils.read_manifest` (table) and `read_manifest_config` (header), or skip lines starting with `#` in your own code.
+
+- **pipeline_invocation.json**: Written only by the `giftwrap` end-to-end command, never by the individual `giftwrap-*` step commands. A JSON list (oldest first) with one record per `giftwrap` invocation of this output directory, each holding the `command` line, raw `argv`, `cwd`, `timestamp`, `giftwrap_version` and `platform`. Resuming an interrupted run appends a record. The step 5 HTML report shows the most recent command at the bottom of its Summary tab; when the file is absent (steps run by hand) the report omits it. Read it with `giftwrap.pipeline_utils.read_pipeline_invocations`.
 
 - **barcodes.tsv.gz**: A gzipped file containing the list of cell barcodes that were encountered in the run. The barcodes are used to collapse the strings into integer indices for efficient storage and processing.
 

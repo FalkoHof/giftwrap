@@ -7,6 +7,7 @@ Matches the visual authority of CellRanger web_summary.html.
 
 from __future__ import annotations
 import base64
+import html as _html
 import json
 from pathlib import Path
 from typing import Optional
@@ -14,7 +15,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from .pipeline_utils import normalize_barcodes_to_target, real_gapfill_mask, read_manifest_config
+from .pipeline_utils import normalize_barcodes_to_target, real_gapfill_mask, read_manifest_config, \
+    read_pipeline_invocations
 
 # Third-party web assets are vendored under giftwrap/assets/ and inlined into the
 # report so it renders with no network access — these reports are routinely opened
@@ -628,6 +630,44 @@ def _technology_label(technology: Optional[str]) -> Optional[str]:
     return technology
 
 
+def _command_block_html(invocations: list[dict]) -> str:
+    """
+    Footnote at the bottom of the Summary tab showing the ``giftwrap`` command line that produced
+    this output directory.
+    Returns an empty string when there is no recorded invocation, i.e. the steps were run
+    individually rather than through the ``giftwrap`` orchestrator, so nothing is shown.
+    """
+    if not invocations:
+        return ""
+    latest = invocations[-1]
+    command = _html.escape(str(latest.get("command", "")), quote=True)
+    if not command:
+        return ""
+    meta = []
+    if latest.get("giftwrap_version"):
+        meta.append(f"v{_html.escape(str(latest['giftwrap_version']))}")
+    if latest.get("timestamp"):
+        meta.append(_html.escape(str(latest["timestamp"]).replace("T", " ")[:16]))
+    meta_html = f'<span class="run-command-meta">{" &middot; ".join(meta)}</span>' if meta else ""
+    tip_html = ""
+    if len(invocations) > 1:
+        earlier = []
+        for inv in invocations[:-1]:
+            when = str(inv.get("timestamp", ""))[:16].replace("T", " ")
+            earlier.append(f"{when}  {inv.get('command', '')}".strip())
+        tip = (f"This output directory was produced by {len(invocations)} giftwrap runs "
+               f"(e.g. a resume after an interruption). The most recent is shown; earlier runs:\n"
+               + "\n".join(earlier))
+        tip_html = f' <span class="help-btn" data-tip="{_html.escape(tip, quote=True)}">?</span>'
+    return (
+        '<div class="run-command">'
+        f'<b>Pipeline command</b>{tip_html} '
+        f'<code>{command}</code>'
+        f'{meta_html}'
+        '</div>'
+    )
+
+
 def _as_int(value, default: int) -> int:
     try:
         return int(value)
@@ -992,6 +1032,28 @@ body {{
 }}
 .run-header .run-meta span {{ display: flex; gap: 5px; align-items: center; }}
 .run-header .run-meta b {{ color: var(--text2); font-weight: 500; }}
+/* ── Pipeline command footnote (Summary tab, under the plots). Only rendered when the
+   full `giftwrap` orchestrator produced the output directory. ── */
+.run-command {{
+  font-size: 12px;
+  color: var(--text3);
+  line-height: 1.6;
+  padding-top: 4px;
+}}
+.run-command b {{ color: var(--text2); font-weight: 500; margin-right: 6px; }}
+.run-command code {{
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text2);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}}
+.run-command .run-command-meta {{ font-family: var(--mono); font-size: 11px; margin-left: 8px; white-space: nowrap; }}
 
 /* ── QC flags bar: sits between the run header and the tab nav, so it's
    visible no matter which tab is active ── */
@@ -1405,6 +1467,7 @@ Shifted right = many reads are PCR duplicates (high saturation); near 1 = most r
       <div class="card-body"><div id="plot-saturation"></div></div>
     </div>
   </div>
+  {command_block}
 </div>
 
 <!-- CELL QC TAB -->
@@ -1616,6 +1679,12 @@ def make_html_report(
         run_config = read_manifest_config(Path(fastq_metrics_path).parent)
     except Exception as e:
         print(f"  Warning: could not read run configuration from manifest.tsv: {e}")
+    # Only present when the full `giftwrap` pipeline was used (not the individual step commands)
+    invocations: list[dict] = []
+    try:
+        invocations = read_pipeline_invocations(Path(fastq_metrics_path).parent)
+    except Exception as e:
+        print(f"  Warning: could not read pipeline_invocation.json: {e}")
 
     sankey_fig          = _fig_sankey(fastq, counts)
     barcode_rank_fig    = _fig_barcode_rank(gapfill_adata)
@@ -1793,6 +1862,7 @@ def make_html_report(
         ilab_meta_span=ilab_meta_span,
         metrics_download=metrics_download,
         chemistry_span=chemistry_span,
+        command_block=_command_block_html(invocations),
         hero_html=hero_html,
         flags_html=flags_html,
         counts_rows=_rows(counts, _COUNTS_ORDER, _COUNTS_HELP, _counts_row_style),

@@ -8,8 +8,11 @@ from enum import Enum
 warnings.filterwarnings("ignore", category=FutureWarning)
 os.environ.setdefault("PYTHONWARNINGS", "ignore::FutureWarning")  # inherit to subprocesses
 
+import datetime
 import functools
 import gzip
+import shlex
+import sys
 import io
 import json
 import shutil
@@ -173,6 +176,89 @@ def write_manifest(output_dir: Path, df: pd.DataFrame, config: Optional[dict] = 
         for key, value in (config or {}).items():
             f.write(f"{_MANIFEST_HEADER_PREFIX}{key}={json.dumps(value)}\n")
         df.to_csv(f, index=False, sep="\t", lineterminator="\n")
+
+
+# Written only by the ``giftwrap`` orchestrator (see pipeline.py); never by the individual
+# ``giftwrap-*`` steps. Its absence therefore means the steps were run by hand.
+PIPELINE_INVOCATION_FILE = "pipeline_invocation.json"
+
+
+def format_command_line(argv: list[str]) -> str:
+    """
+    Render an argv list as a copy-pasteable command line. The program name is reduced to its
+    basename (``/path/to/.venv/bin/giftwrap`` -> ``giftwrap``) and arguments are quoted for the
+    current platform's shell.
+
+    :param argv: The argument vector, typically ``sys.argv``.
+    :return: The command line as a single string.
+    """
+    if not argv:
+        return ""
+    prog = Path(argv[0]).name
+    for suffix in (".exe", "-script.py", ".py"):
+        if prog.lower().endswith(suffix):
+            prog = prog[: -len(suffix)]
+            break
+    parts = [prog] + [str(a) for a in argv[1:]]
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
+
+
+def record_pipeline_invocation(output_dir: Path, argv: Optional[list[str]] = None) -> dict:
+    """
+    Append the current ``giftwrap`` pipeline invocation to ``pipeline_invocation.json`` in the output
+    directory. The file is a JSON list, oldest first, so a resumed run keeps its history.
+
+    Only the ``giftwrap`` orchestrator calls this; standalone step commands do not, so downstream
+    consumers (e.g. the step 5 QC report) can tell whether the full pipeline was used.
+
+    :param output_dir: The pipeline output directory (must exist).
+    :param argv: The argument vector to record. Defaults to ``sys.argv``.
+    :return: The record that was appended.
+    """
+    if not isinstance(output_dir, Path):
+        output_dir = Path(output_dir)
+    if argv is None:
+        argv = sys.argv
+    argv = [str(a) for a in argv]
+    record = {
+        "timestamp": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "giftwrap_version": getattr(sys.modules.get("giftwrap"), "__version__", None),
+        "command": format_command_line(argv),
+        "argv": argv,
+        "cwd": os.getcwd(),
+        "platform": sys.platform,
+    }
+    history = read_pipeline_invocations(output_dir)
+    history.append(record)
+    with open(output_dir / PIPELINE_INVOCATION_FILE, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+        f.write("\n")
+    return record
+
+
+def read_pipeline_invocations(output_dir: Path) -> list[dict]:
+    """
+    Read the ``giftwrap`` pipeline invocation history written by :func:`record_pipeline_invocation`.
+
+    :param output_dir: The pipeline output directory.
+    :return: The invocation records, oldest first. Empty when the file is missing or unreadable,
+        i.e. when the steps were run individually rather than through ``giftwrap``.
+    """
+    if not isinstance(output_dir, Path):
+        output_dir = Path(output_dir)
+    path = output_dir / PIPELINE_INVOCATION_FILE
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            history = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(history, dict):  # tolerate a single record
+        history = [history]
+    return [h for h in history if isinstance(h, dict) and h.get("command")]
 
 
 class TechnologyFormatInfo(ABC):

@@ -292,6 +292,15 @@ def main():
     else:
         print("Step 1: Gapfill counting already done.", file=sys.stderr, flush=True)
 
+    # Record how the full pipeline was invoked so the step 5 report can show it. Only this
+    # orchestrator writes the file; running the steps by hand leaves it absent. Written after step 1
+    # because step 1 creates (or, with --overwrite, recreates) the output directory.
+    try:
+        from .pipeline_utils import record_pipeline_invocation
+        record_pipeline_invocation(output, sys.argv)
+    except Exception as e:
+        print(f"Warning: could not record the pipeline invocation: {e}", file=sys.stderr, flush=True)
+
     # Step 2: Correct UMIs
     if not (output / "steps" / "CORRECT_UMIS").exists() or overwrite:
         print("Step 2: Correcting UMIs.", file=sys.stderr, flush=True)
