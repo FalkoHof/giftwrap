@@ -862,7 +862,7 @@ wheels = [
 
 [[package]]
 name = "giftwrap-sc"
-version = "0.5.1.dev3"
+version = "0.6.2.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "anndata" },
