@@ -107,6 +107,33 @@ giftwrap-generate-tech = "giftwrap.misc_scripts:print_tech"
 giftwrap-convert-probes = "giftwrap.misc_scripts:convert_probes"
 giftwrap-revert-probes = "giftwrap.misc_scripts:revert_probes"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+xfail_strict = true
+filterwarnings = [
+    "ignore::FutureWarning:spatialdata.*",
+    "ignore:Importing read_text from `anndata` is deprecated:FutureWarning",
+    "ignore:This process .* is multi-threaded, use of fork\\(\\) may lead to deadlocks:DeprecationWarning",
+]
+markers = [
+    "known_defect: encodes intended behavior for a confirmed source defect (strict xfail)",
+    "integration: runs several pipeline steps end-to-end",
+    "slow: loads large bundled resources or renders heavy plots",
+    "multiprocess: spawns a multiprocessing pool",
+]
+
+[tool.coverage.run]
+source = ["giftwrap"]
+branch = true
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
