@@ -889,10 +889,6 @@ class TestRun:
         assert [Path(p).name for p in r1s] == ["lib_R1_L001.fq", "lib_R1_L002.fq"]
         assert [Path(p).name for p in r2s] == ["lib_R2_L001.fq", "lib_R2_L002.fq"]
 
-    @pytest.mark.known_defect
-    @pytest.mark.xfail(
-        reason="read patterns with a directory pair each R1 file with itself"
-    )
     def test_read_patterns_with_directory_pair_r1_with_r2(self, run_env, tmp_path):
         """R1/R2 prefixes that include a directory pair each R1 with its R2."""
         (tmp_path / "lanes").mkdir()
@@ -905,10 +901,32 @@ class TestRun:
         )["search_files"][0][:2]
         assert [Path(p).name for p in r2s] == ["lib_R2_L001.fq"]
 
+    def test_read_patterns_in_a_directory_with_a_dot_are_still_patterns(self, run_env, tmp_path):
+        """A dot in a parent directory does not make an R1/R2 prefix look like a file name."""
+        lanes = tmp_path / "lanes.v2"
+        lanes.mkdir()
+        support.write_fastq(lanes / "lib_R1_L001.fq", [("r", "A", "I")])
+        support.write_fastq(lanes / "lib_R2_L001.fq", [("r", "C", "I")])
+        r1s, r2s = _run(run_env, read1=str(lanes / "lib_R1"), read2=str(lanes / "lib_R2"))["search_files"][0][:2]
+        assert [Path(p).name for p in r1s] == ["lib_R1_L001.fq"]
+        assert [Path(p).name for p in r2s] == ["lib_R2_L001.fq"]
+
+    def test_project_prefix_only_swaps_r1_in_the_file_name(self, run_env, tmp_path):
+        """`--project` pairs R2 by file name, so an `R1` in a directory name is left alone."""
+        support.write_fastq_pair(tmp_path / "R1_batch", SINGLEPLEX_READS[:1], name="sample")
+        calls = _run(
+            run_env, read1=None, read2=None, project=str(tmp_path / "R1_batch" / "sample")
+        )
+        r1s, r2s = calls["search_files"][0][:2]
+        assert [Path(p).parent.name for p in r2s] == ["R1_batch"]
+        assert [Path(p).name for p in r2s] == ["sample_S1_R2_001.fastq.gz"]
+
     @pytest.mark.parametrize(
         ("kwargs", "message"),
         [
             (dict(read1=None, read2=None, project=None), "At least one"),
+            (dict(read2=None), "Both read1 and read2"),
+            (dict(read1=None), "Both read1 and read2"),
             (dict(multiplex=2, barcodes=["1"]), "mutually exclusive"),
             (dict(multiplex=2, skip_constant_seq=True), "only valid for singleplex"),
             (
