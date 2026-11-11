@@ -540,6 +540,7 @@ def build_manifest(probes, output: Path, overwrite, allow_any_combination, trim_
 def _validate_run_args(read1, read2, project, multiplex, barcodes, skip_constant_seq) -> None:
     if (read1 == read2 == project) and project is None:
         raise AssertionError("At least one of the read1, read2, or project arguments must be provided.")
+    assert project is not None or (read1 is not None and read2 is not None), "Both read1 and read2 must be provided when project is not."
     assert not (multiplex > 1 and barcodes), "Multiplex and barcode arguments are mutually exclusive."
     assert (not skip_constant_seq) or (multiplex < 2 and (len(barcodes) <= 1)), "Skipping the constant sequence is only valid for singleplex sequencing."
 
@@ -562,12 +563,12 @@ def _discover_fastq_pairs(read1, read2, project) -> tuple[list[str], list[str]]:
             if r1.suffix not in {".fastq", ".gz", '.fq',}: # Skip non-fastq files
                 continue
             read1s.append(str(r1))
-            possible_r2 = Path(str(r1).replace("R1", "R2"))
+            possible_r2 = r1.with_name(r1.name.replace("R1", "R2"))
             if not possible_r2.exists():
                 raise FileNotFoundError(f"Matching R2 file not found: {possible_r2}")
             read2s.append(str(possible_r2))
     else:
-        if '.' in read1 or '.' in read2:  # Assuming these are file names
+        if '.' in Path(read1).name or '.' in Path(read2).name:  # Assuming these are file names
             assert osp.exists(read1), f"Read1 file not found: {read1}"
             assert osp.exists(read2), f"Read2 file not found: {read2}"
             assert (".gz" in read1) == (".gz" in read2), "Read1 and Read2 must either both be gzipped or not gzipped."
@@ -578,7 +579,7 @@ def _discover_fastq_pairs(read1, read2, project) -> tuple[list[str], list[str]]:
             read2s = []
             for r1 in sorted(Path(read1).parent.glob(Path(read1).name + "*")):
                 read1s.append(str(r1))
-                possible_r2 = Path(read2).parent / r1.name.replace(read1, read2)
+                possible_r2 = Path(read2).parent / r1.name.replace(Path(read1).name, Path(read2).name)
                 if not possible_r2.exists():
                     raise FileNotFoundError(f"Matching R2 file not found: {possible_r2}")
                 read2s.append(str(possible_r2))
