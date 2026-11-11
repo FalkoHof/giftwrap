@@ -10,6 +10,7 @@ import gzip
 import shutil
 import sys
 from collections import namedtuple, Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -688,64 +689,74 @@ def _make_run_config(technology, tech_df, multiplex, barcodes, skip_constant_seq
     }
 
 
-def run(probes,
-        trim_probes,
-        read1,
-        read2,
-        project,
-        output,
-        cores,
-        n_reads_per_batch,
-        max_distance,
-        technology,
-        tech_df,
-        overwrite,
-        multiplex,
-        barcodes,
-        r1_len,
-        r2_len,
-        allow_indels,
-        skip_constant_seq,
-        allow_any_combination,
-        unmapped_reads_prefix,
-        cellranger_output,
-        flexible_start,
-        max_expected_gap,
-        fallback_sort):
-    barcodes = barcodes or []
-    _validate_run_args(read1, read2, project, multiplex, barcodes, skip_constant_seq)
-    cellranger_output = _normalize_cellranger_output(cellranger_output)
+@dataclass(frozen=True)
+class RunOptions:
+    """Options for :func:`run`; the defaults mirror the ``giftwrap-count`` command line."""
+    probes: str
+    output: str
+    trim_probes: int = -1
+    read1: Optional[str] = None
+    read2: Optional[str] = None
+    project: Optional[str] = None
+    cores: int = 1
+    n_reads_per_batch: int = 10_000_000
+    max_distance: int = 1
+    technology: str = "Flex"
+    tech_def: Optional[str] = None
+    overwrite: bool = False
+    multiplex: int = 1
+    barcodes: Optional[list[str]] = None
+    r1_len: Optional[int] = None
+    r2_len: Optional[int] = None
+    allow_indels: bool = False
+    skip_constant_seq: bool = False
+    allow_any_combination: bool = False
+    unmapped_reads_prefix: Optional[str] = None
+    cellranger_output: Optional[list[str]] = None
+    flexible_start: bool = False
+    max_expected_gap: int = -1
+    fallback_sort: bool = False
 
-    read1s, read2s = _discover_fastq_pairs(read1, read2, project)
 
-    assert osp.exists(probes), f"Probes file not found: {probes}"
+def run(opts: RunOptions):
+    barcodes = opts.barcodes or []
+    _validate_run_args(opts.read1, opts.read2, opts.project, opts.multiplex, barcodes, opts.skip_constant_seq)
+    cellranger_output = _normalize_cellranger_output(opts.cellranger_output)
+
+    read1s, read2s = _discover_fastq_pairs(opts.read1, opts.read2, opts.project)
+
+    assert osp.exists(opts.probes), f"Probes file not found: {opts.probes}"
+    cores = opts.cores
     if cores < 1:
         cores = os.cpu_count()
-    output = Path(output)
+    output = Path(opts.output)
 
     barcode_dir = _find_barcode_dir()
-    tech_info = _build_tech_info(technology, tech_df, barcode_dir, r1_len, r2_len, cellranger_output)
+    tech_info = _build_tech_info(opts.technology, opts.tech_def, barcode_dir, opts.r1_len, opts.r2_len,
+                                 cellranger_output)
 
     # Canonical probe barcode ids (accepts e.g. BC01 / A01 as documented); fails early on unknown ids
     barcodes = [tech_info.normalize_probe_barcode_id(b) for b in barcodes]
 
     # Run configuration embedded in manifest.tsv so downstream steps (e.g. the step 5 QC report) can
     # reason about the technology and options this run was processed with.
-    run_config = _make_run_config(technology, tech_df, multiplex, barcodes, skip_constant_seq, trim_probes,
-                                  max_expected_gap, flexible_start, allow_any_combination, r1_len, r2_len,
-                                  tech_info)
+    run_config = _make_run_config(opts.technology, opts.tech_def, opts.multiplex, barcodes, opts.skip_constant_seq,
+                                  opts.trim_probes, opts.max_expected_gap, opts.flexible_start,
+                                  opts.allow_any_combination, opts.r1_len, opts.r2_len, tech_info)
 
-    computed_max_expected_gap, _ = build_manifest(probes, output, overwrite, allow_any_combination, trim_probes,
-                                                  config=run_config, tech_info=tech_info)
+    computed_max_expected_gap, _ = build_manifest(opts.probes, output, opts.overwrite, opts.allow_any_combination,
+                                                  opts.trim_probes, config=run_config, tech_info=tech_info)
 
+    max_expected_gap = opts.max_expected_gap
     if max_expected_gap < 0:
         max_expected_gap = computed_max_expected_gap
 
     search_files(read1s, read2s, output, tech_info,
-                 cores=cores, n_reads_per_batch=n_reads_per_batch, max_distance=max_distance,
-                 multiplex=multiplex, barcodes=barcodes, allow_indels=allow_indels,
-                 skip_constant_seq=skip_constant_seq, unmapped_reads_prefix=unmapped_reads_prefix,
-                 flexible_start=flexible_start, max_expected_gap=max_expected_gap, use_pandas=fallback_sort)
+                 cores=cores, n_reads_per_batch=opts.n_reads_per_batch, max_distance=opts.max_distance,
+                 multiplex=opts.multiplex, barcodes=barcodes, allow_indels=opts.allow_indels,
+                 skip_constant_seq=opts.skip_constant_seq, unmapped_reads_prefix=opts.unmapped_reads_prefix,
+                 flexible_start=opts.flexible_start, max_expected_gap=max_expected_gap,
+                 use_pandas=opts.fallback_sort)
     exit(0)
 
 
@@ -926,32 +937,32 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     args = build_parser().parse_args()
 
-    run(
-        args.probes,
-        args.trim_probes,
-        args.read1,
-        args.read2,
-        args.project,
-        args.output,
-        args.cores,
-        args.n_reads_per_batch,
-        args.threshold,
-        args.technology,
-        args.tech_def,
-        args.overwrite,
-        args.multiplex,
-        args.barcode,
-        args.r1_length,
-        args.r2_length,
-        args.allow_indels,
-        args.skip_constant_seq,
-        args.allow_any_combination,
-        args.unmapped_reads,
-        args.cellranger_output,
-        args.flexible_start_mapping,
-        args.expected_gap_length,
-        args.fallback_sort
-    )
+    run(RunOptions(
+        probes=args.probes,
+        output=args.output,
+        trim_probes=args.trim_probes,
+        read1=args.read1,
+        read2=args.read2,
+        project=args.project,
+        cores=args.cores,
+        n_reads_per_batch=args.n_reads_per_batch,
+        max_distance=args.threshold,
+        technology=args.technology,
+        tech_def=args.tech_def,
+        overwrite=args.overwrite,
+        multiplex=args.multiplex,
+        barcodes=args.barcode,
+        r1_len=args.r1_length,
+        r2_len=args.r2_length,
+        allow_indels=args.allow_indels,
+        skip_constant_seq=args.skip_constant_seq,
+        allow_any_combination=args.allow_any_combination,
+        unmapped_reads_prefix=args.unmapped_reads,
+        cellranger_output=args.cellranger_output,
+        flexible_start=args.flexible_start_mapping,
+        max_expected_gap=args.expected_gap_length,
+        fallback_sort=args.fallback_sort,
+    ))
 
 
 if __name__ == '__main__':

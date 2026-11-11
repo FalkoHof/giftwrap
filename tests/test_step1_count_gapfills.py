@@ -675,7 +675,7 @@ def _run(env, **kwargs):
             n_reads_per_batch=10,
             max_distance=1,
             technology="Flex",
-            tech_df=None,
+            tech_def=None,
             overwrite=False,
             multiplex=1,
             barcodes=None,
@@ -693,7 +693,7 @@ def _run(env, **kwargs):
         | kwargs
     )
     with pytest.raises(SystemExit) as exc:
-        step1.run(**args)
+        step1.run(step1.RunOptions(**args))
     assert exc.value.code == 0
     return env.calls
 
@@ -800,7 +800,7 @@ class TestRun:
         monkeypatch.syspath_prepend(str(tmp_path))
         monkeypatch.delitem(sys.modules, "custom_tech_mod", raising=False)
         calls = _run(
-            run_env, technology="Custom", tech_df=str(tmp_path / "custom_tech_mod.py")
+            run_env, technology="Custom", tech_def=str(tmp_path / "custom_tech_mod.py")
         )
         tech = calls["build_manifest"][1]["tech_info"]
         assert type(tech).__name__ == "CustomTech" and tech.args == (
@@ -827,7 +827,7 @@ class TestRun:
         _run(
             run_env,
             technology="Custom",
-            tech_df=str(tmp_path / "defs" / "other_tech_mod.py"),
+            tech_def=str(tmp_path / "defs" / "other_tech_mod.py"),
         )
 
     def test_project_prefix_discovers_paired_fastqs(self, run_env, tmp_path):
@@ -846,30 +846,11 @@ class TestRun:
         support.write_fastq(tmp_path / "solo_R1_001.fastq.gz", [("r", "A", "I")])
         with pytest.raises(FileNotFoundError, match="Matching R2"):
             step1.run(
-                run_env.probes,
-                -1,
-                None,
-                None,
-                str(tmp_path / "solo"),
-                str(tmp_path / "o"),
-                1,
-                1,
-                1,
-                "Flex",
-                None,
-                False,
-                1,
-                None,
-                None,
-                None,
-                False,
-                False,
-                False,
-                None,
-                None,
-                False,
-                -1,
-                False,
+                step1.RunOptions(
+                    probes=run_env.probes,
+                    output=str(tmp_path / "o"),
+                    project=str(tmp_path / "solo"),
+                )
             )
 
     def test_relative_read_patterns_pair_files_in_working_directory(
@@ -985,9 +966,9 @@ class TestRunHelpers:
 
 class TestMain:
     def test_all_arguments_are_forwarded_to_run(self, monkeypatch):
-        """Every CLI option reaches `run` in its positional slot."""
+        """Every CLI option reaches `run` in its `RunOptions` field."""
         calls = []
-        monkeypatch.setattr(step1, "run", lambda *a: calls.append(a))
+        monkeypatch.setattr(step1, "run", calls.append)
         monkeypatch.setattr(
             sys,
             "argv",
@@ -1043,68 +1024,41 @@ class TestMain:
         )
         step1.main()
         assert calls == [
-            (
-                "probes.tsv",
-                40,
-                "R1",
-                "R2",
-                "proj",
-                "out",
-                4,
-                100,
-                2,
-                "Flex-v2",
-                "t.py",
-                True,
-                1,
-                ["A01", "A02"],
-                28,
-                90,
-                True,
-                True,
-                True,
-                "un",
-                ["a", "b"],
-                True,
-                5,
-                True,
+            step1.RunOptions(
+                probes="probes.tsv",
+                output="out",
+                trim_probes=40,
+                read1="R1",
+                read2="R2",
+                project="proj",
+                cores=4,
+                n_reads_per_batch=100,
+                max_distance=2,
+                technology="Flex-v2",
+                tech_def="t.py",
+                overwrite=True,
+                multiplex=1,
+                barcodes=["A01", "A02"],
+                r1_len=28,
+                r2_len=90,
+                allow_indels=True,
+                skip_constant_seq=True,
+                allow_any_combination=True,
+                unmapped_reads_prefix="un",
+                cellranger_output=["a", "b"],
+                flexible_start=True,
+                max_expected_gap=5,
+                fallback_sort=True,
             )
         ]
 
     def test_defaults(self, monkeypatch):
         """Only `--probes` and `--output` are required; every other option has a default."""
         calls = []
-        monkeypatch.setattr(step1, "run", lambda *a: calls.append(a))
+        monkeypatch.setattr(step1, "run", calls.append)
         monkeypatch.setattr(sys, "argv", ["giftwrap-count", "-p", "p.tsv", "-o", "out"])
         step1.main()
-        assert calls == [
-            (
-                "p.tsv",
-                -1,
-                None,
-                None,
-                None,
-                "out",
-                1,
-                10_000_000,
-                1,
-                "Flex",
-                None,
-                False,
-                1,
-                None,
-                None,
-                None,
-                False,
-                False,
-                False,
-                None,
-                None,
-                False,
-                -1,
-                False,
-            )
-        ]
+        assert calls == [step1.RunOptions(probes="p.tsv", output="out")]
 
     def test_rejects_unknown_technology(self, monkeypatch):
         """An unknown `--technology` is a usage error (exit 2)."""
