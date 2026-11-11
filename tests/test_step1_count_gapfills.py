@@ -812,11 +812,6 @@ class TestRun:
             tmp_path / "custom_tech_mod.py"
         )
 
-    @pytest.mark.known_defect
-    @pytest.mark.xfail(
-        raises=ModuleNotFoundError,
-        reason="--tech_def is imported by module name, so files off sys.path fail",
-    )
     def test_custom_technology_file_outside_sys_path(self, run_env, tmp_path):
         """A custom technology file is loaded from its path wherever it lives."""
         (tmp_path / "defs").mkdir()
@@ -962,6 +957,43 @@ class TestRunHelpers:
             [str(r1)],
             [str(r2)],
         )
+
+
+class TestLoadCustomTechnology:
+    @staticmethod
+    def _write(monkeypatch, tmp_path, stem, source):
+        monkeypatch.setitem(sys.modules, stem, None)  # the loader registers the module; undone on teardown
+        path = tmp_path / f"{stem}.py"
+        path.write_text(source)
+        return path
+
+    def test_imported_classes_are_not_mistaken_for_the_technology(self, monkeypatch, tmp_path):
+        """Classes imported into the definition file are ignored in favour of the class it defines."""
+        path = self._write(
+            monkeypatch, tmp_path, "ordered_tech",
+            "from collections import OrderedDict\n\nclass ZTech:\n    pass\n",
+        )
+        assert step1._load_custom_technology(path).__name__ == "ZTech"
+
+    def test_technology_subclass_wins_among_several_classes(self, monkeypatch, tmp_path):
+        """With several classes defined, the `TechnologyFormatInfo` subclass is selected."""
+        path = self._write(
+            monkeypatch, tmp_path, "multi_tech",
+            "from giftwrap.pipeline_utils import TechnologyFormatInfo\n\n"
+            "class Helper:\n    pass\n\nclass MyTech(TechnologyFormatInfo):\n    pass\n",
+        )
+        assert step1._load_custom_technology(path).__name__ == "MyTech"
+
+    @pytest.mark.parametrize(
+        "source",
+        ["x = 1\n", "class A:\n    pass\n\nclass B:\n    pass\n"],
+        ids=["no-class", "ambiguous"],
+    )
+    def test_missing_or_ambiguous_class_raises(self, monkeypatch, tmp_path, source):
+        """A definition file without exactly one candidate class is rejected with the candidates named."""
+        path = self._write(monkeypatch, tmp_path, "bad_tech", source)
+        with pytest.raises(ValueError, match="exactly one technology class"):
+            step1._load_custom_technology(path)
 
 
 class TestMain:
