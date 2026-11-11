@@ -7,6 +7,7 @@ import argparse
 import functools
 import os.path as osp
 import gzip
+import importlib.util
 import shutil
 import sys
 from collections import namedtuple, Counter
@@ -608,15 +609,31 @@ def _find_barcode_dir() -> Optional[Path]:
     return barcode_dir
 
 
+def _load_custom_technology(tech_def) -> type:
+    path = Path(tech_def)
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load a technology definition from {path}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered so that worker processes can unpickle instances of the class
+    sys.modules[path.stem] = module
+    spec.loader.exec_module(module)
+
+    defined = [c for c in vars(module).values() if isinstance(c, type) and c.__module__ == module.__name__]
+    if len(defined) > 1:
+        defined = [c for c in defined if issubclass(c, TechnologyFormatInfo)]
+    if len(defined) != 1:
+        raise ValueError(f"{path} must define exactly one technology class (inheriting from TechnologyFormatInfo), "
+                         f"found: {[c.__name__ for c in defined] or 'none'}")
+    return defined[0]
+
+
 def _build_tech_info(technology, tech_df, barcode_dir, r1_len, r2_len, cellranger_output) -> TechnologyFormatInfo:
     print("Extracting sequencing technology information...", end="")
     tech_info: TechnologyFormatInfo
     if technology == "Custom":
         print(f"Loading custom technology definition from {tech_df}...", end="")
-        tech_module = Path(tech_df).stem
-        tech_module = __import__(tech_module)
-        # Get the classes and select the first one.
-        clazz = [getattr(tech_module, a) for a in dir(tech_module) if isinstance(getattr(tech_module, a), type)][0]
+        clazz = _load_custom_technology(tech_df)
         tech_info = clazz(
             barcode_dir,
             r1_len,
