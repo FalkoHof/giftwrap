@@ -749,7 +749,7 @@ def run(probes,
     exit(0)
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Quantify the genotypes of Gap-filling probes.", formatter_class=RichHelpFormatter
     )
@@ -920,7 +920,11 @@ def main():
         help="If set, will use pandas to sort the output file instead of the default unix sort. This is slower but more robust on some systems."
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     run(
         args.probes,

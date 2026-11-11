@@ -1114,3 +1114,12 @@ class TestMain:
         with pytest.raises(SystemExit) as exc:
             step1.main()
         assert exc.value.code == 2
+
+    def test_build_parser_parses_arguments_without_touching_sys_argv(self):
+        """`build_parser` returns a standalone parser whose defaults and choices match the CLI."""
+        args = step1.build_parser().parse_args(["-p", "p.tsv", "-o", "out", "-e", "Visium-v2"])
+        assert (args.probes, args.output, args.technology) == ("p.tsv", "out", "Visium-v2")
+        assert (args.cores, args.multiplex, args.n_reads_per_batch) == (1, 1, 10_000_000)
+        assert args.barcode is None and args.cellranger_output is None
+        with pytest.raises(SystemExit):
+            step1.build_parser().parse_args(["-p", "p", "-o", "o", "-e", "Nope"])
