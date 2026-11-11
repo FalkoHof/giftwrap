@@ -932,6 +932,57 @@ class TestRun:
             _run(run_env, probes=str(tmp_path / "nope.tsv"))
 
 
+class TestRunHelpers:
+    def test_make_run_config_coerces_options_and_records_technology_flags(self):
+        """The run config coerces option types and records the technology's barcode flags."""
+        config = step1._make_run_config(
+            "Custom",
+            Path("defs/t.py"),
+            2,
+            ["BC01"],
+            True,
+            40,
+            -1,
+            False,
+            True,
+            28,
+            None,
+            FakeTech(),
+        )
+        assert config == {
+            "giftwrap_version": giftwrap.__version__,
+            "technology": "Custom",
+            "tech_def": "defs/t.py",
+            "multiplex": 2,
+            "barcodes": ["BC01"],
+            "multiplexed": True,
+            "skip_constant_seq": True,
+            "trim_probes": 40,
+            "expected_gap_length": -1,
+            "flexible_start_mapping": False,
+            "allow_any_combination": True,
+            "r1_length": 28,
+            "r2_length": None,
+            "has_probe_barcode": True,
+            "probe_barcode_R1": False,
+        }
+
+    def test_normalize_cellranger_output_accepts_string_list_or_nothing(self):
+        """A single path or a list becomes a list of `Path`s, and empty input becomes None."""
+        assert step1._normalize_cellranger_output("a.h5") == [Path("a.h5")]
+        assert step1._normalize_cellranger_output(["a", "b"]) == [Path("a"), Path("b")]
+        assert step1._normalize_cellranger_output([]) is None
+        assert step1._normalize_cellranger_output(None) is None
+
+    def test_discover_fastq_pairs_returns_explicit_files_as_one_pair(self, tmp_path):
+        """Explicit R1/R2 files are returned as a single pair of path strings."""
+        r1, r2 = support.write_fastq_pair(tmp_path / "fq", SINGLEPLEX_READS[:1])
+        assert step1._discover_fastq_pairs(str(r1), str(r2), None) == (
+            [str(r1)],
+            [str(r2)],
+        )
+
+
 class TestMain:
     def test_all_arguments_are_forwarded_to_run(self, monkeypatch):
         """Every CLI option reaches `run` in its positional slot."""

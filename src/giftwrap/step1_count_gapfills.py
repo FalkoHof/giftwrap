@@ -535,45 +535,23 @@ def build_manifest(probes, output: Path, overwrite, allow_any_combination, trim_
     return max_expected_gap, max_probe_extent
 
 
-def run(probes,
-        trim_probes,
-        read1,
-        read2,
-        project,
-        output,
-        cores,
-        n_reads_per_batch,
-        max_distance,
-        technology,
-        tech_df,
-        overwrite,
-        multiplex,
-        barcodes,
-        r1_len,
-        r2_len,
-        allow_indels,
-        skip_constant_seq,
-        allow_any_combination,
-        unmapped_reads_prefix,
-        cellranger_output,
-        flexible_start,
-        max_expected_gap,
-        fallback_sort):
-    barcodes = barcodes or []
+def _validate_run_args(read1, read2, project, multiplex, barcodes, skip_constant_seq) -> None:
     if (read1 == read2 == project) and project is None:
         raise AssertionError("At least one of the read1, read2, or project arguments must be provided.")
     assert not (multiplex > 1 and barcodes), "Multiplex and barcode arguments are mutually exclusive."
     assert (not skip_constant_seq) or (multiplex < 2 and (len(barcodes) <= 1)), "Skipping the constant sequence is only valid for singleplex sequencing."
 
+
+def _normalize_cellranger_output(cellranger_output) -> Optional[list[Path]]:
     if isinstance(cellranger_output, str):
         cellranger_output = [cellranger_output]
-    has_cellranger = cellranger_output is not None and len(cellranger_output) > 0
-    if has_cellranger:
-        cellranger_output = [Path(x) for x in cellranger_output]
+    if cellranger_output is not None and len(cellranger_output) > 0:
         print("WTA CellRanger output provided.")
-    else:
-        cellranger_output = None
+        return [Path(x) for x in cellranger_output]
+    return None
 
+
+def _discover_fastq_pairs(read1, read2, project) -> tuple[list[str], list[str]]:
     print("Searching for fastq files...", end="")
     if project is not None:
         read1s = []
@@ -605,12 +583,10 @@ def run(probes,
     print(f"Found {len(read1s)} pairs of fastq files:")
     for r1, r2 in zip(read1s, read2s):
         print(f"{r1} | {r2}")
+    return read1s, read2s
 
-    assert osp.exists(probes), f"Probes file not found: {probes}"
-    if cores < 1:
-        cores = os.cpu_count()
-    output = Path(output)
 
+def _find_barcode_dir() -> Optional[Path]:
     print("Searching for cell barcodes...", end="")
 
     barcode_dir = None
@@ -629,8 +605,10 @@ def run(probes,
             print("Error: Default barcodes directory still not found:", barcode_dir)
             barcode_dir = None
     print("Done!")
+    return barcode_dir
 
-    # Get the technology information
+
+def _build_tech_info(technology, tech_df, barcode_dir, r1_len, r2_len, cellranger_output) -> TechnologyFormatInfo:
     print("Extracting sequencing technology information...", end="")
     tech_info: TechnologyFormatInfo
     if technology == "Custom":
@@ -686,13 +664,12 @@ def run(probes,
             cellranger_output
         )
     print(f"{tech_info.n_barcodes} cell barcodes found.")
+    return tech_info
 
-    # Canonical probe barcode ids (accepts e.g. BC01 / A01 as documented); fails early on unknown ids
-    barcodes = [tech_info.normalize_probe_barcode_id(b) for b in barcodes]
 
-    # Run configuration embedded in manifest.tsv so downstream steps (e.g. the step 5 QC report) can
-    # reason about the technology and options this run was processed with.
-    run_config = {
+def _make_run_config(technology, tech_df, multiplex, barcodes, skip_constant_seq, trim_probes, max_expected_gap,
+                     flexible_start, allow_any_combination, r1_len, r2_len, tech_info) -> dict:
+    return {
         "giftwrap_version": sys.modules['giftwrap'].__version__,
         "technology": technology,
         "tech_def": str(tech_df) if tech_df is not None else None,
@@ -709,6 +686,54 @@ def run(probes,
         "has_probe_barcode": bool(tech_info.has_probe_barcode),
         "probe_barcode_R1": bool(tech_info.probe_barcode_R1),
     }
+
+
+def run(probes,
+        trim_probes,
+        read1,
+        read2,
+        project,
+        output,
+        cores,
+        n_reads_per_batch,
+        max_distance,
+        technology,
+        tech_df,
+        overwrite,
+        multiplex,
+        barcodes,
+        r1_len,
+        r2_len,
+        allow_indels,
+        skip_constant_seq,
+        allow_any_combination,
+        unmapped_reads_prefix,
+        cellranger_output,
+        flexible_start,
+        max_expected_gap,
+        fallback_sort):
+    barcodes = barcodes or []
+    _validate_run_args(read1, read2, project, multiplex, barcodes, skip_constant_seq)
+    cellranger_output = _normalize_cellranger_output(cellranger_output)
+
+    read1s, read2s = _discover_fastq_pairs(read1, read2, project)
+
+    assert osp.exists(probes), f"Probes file not found: {probes}"
+    if cores < 1:
+        cores = os.cpu_count()
+    output = Path(output)
+
+    barcode_dir = _find_barcode_dir()
+    tech_info = _build_tech_info(technology, tech_df, barcode_dir, r1_len, r2_len, cellranger_output)
+
+    # Canonical probe barcode ids (accepts e.g. BC01 / A01 as documented); fails early on unknown ids
+    barcodes = [tech_info.normalize_probe_barcode_id(b) for b in barcodes]
+
+    # Run configuration embedded in manifest.tsv so downstream steps (e.g. the step 5 QC report) can
+    # reason about the technology and options this run was processed with.
+    run_config = _make_run_config(technology, tech_df, multiplex, barcodes, skip_constant_seq, trim_probes,
+                                  max_expected_gap, flexible_start, allow_any_combination, r1_len, r2_len,
+                                  tech_info)
 
     computed_max_expected_gap, _ = build_manifest(probes, output, overwrite, allow_any_combination, trim_probes,
                                                   config=run_config, tech_info=tech_info)
